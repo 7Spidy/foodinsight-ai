@@ -37,6 +37,7 @@ notion_headers = {
     'Content-Type': 'application/json'
 }
 
+import httpx
 openai_client = OpenAI(
     api_key=OPENAI_API_KEY,
     timeout=30.0,
