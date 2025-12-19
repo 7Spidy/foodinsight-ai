@@ -1,0 +1,9 @@
+# FoodInsight AI - Python Dependencies
+# Install with: pip install -r requirements.txt
+
+requests==2.31.0
+openai==1.28.0
+python-notion-client==2.2.0
+Pillow==10.1.0
+reportlab==4.0.7
+python-dotenv==1.0.0
