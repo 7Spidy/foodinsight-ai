@@ -1,22 +1,15 @@
-#!/usr/bin/env python3
-"""
-FoodInsight AI - Main Food Analysis Script
-Polls Notion, analyzes food images via OpenAI, generates PDFs, updates Notion
-"""
-
 import os
-import sys
-import json
-import base64
 import requests
-from datetime import datetime
-from pathlib import Path
-from typing import Optional, Dict, Any
-from io import BytesIO
+import json
 import logging
-
+from datetime import datetime
+from dotenv import load_dotenv
 from openai import OpenAI
+import httpx
 from pdf_generator import generate_food_infographic
+
+# Load environment variables
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(
@@ -25,49 +18,28 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Environment variables
+# API Keys from environment
 NOTION_TOKEN = os.getenv('NOTION_TOKEN')
 NOTION_DATABASE_ID = os.getenv('NOTION_DATABASE_ID')
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 
-# Initialize clients
+# Notion API headers
 notion_headers = {
     'Authorization': f'Bearer {NOTION_TOKEN}',
     'Notion-Version': '2025-09-03',
     'Content-Type': 'application/json'
 }
 
-import httpx
+# Initialize OpenAI client
 openai_client = OpenAI(
     api_key=OPENAI_API_KEY,
-    timeout=30.0,
-    max_retries=2
+    http_client=httpx.Client()
 )
 
-
-# Configuration for India-specific nutrition
-NUTRITION_CONFIG = {
-    'daily_kcal_target': 2000,
-    'user_age': 35,
-    'user_location': 'Mumbai, India',
-    'daily_protein_target': 50,  # grams
-    'daily_carbs_target': 250,   # grams
-    'daily_fat_target': 65,      # grams
-}
-
-
-def get_notion_database_items() -> list:
+def get_notion_database_items():
     """Fetch all entries from Notion database that haven't been analyzed"""
-# Debug: Print what we're actually sending
-logger.info(f"Database ID: {NOTION_DATABASE_ID}")
-logger.info(f"Database ID type: {type(NOTION_DATABASE_ID)}")
-logger.info(f"Database ID length: {len(NOTION_DATABASE_ID)}")
-
-url = f'https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query'
-logger.info(f"Full URL: {url}")
-
+    url = f'https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query'
     
-    # Simple query without complex filter - just get all entries
     payload = {}
     
     try:
@@ -102,274 +74,174 @@ logger.info(f"Full URL: {url}")
             logger.error(f"Response: {e.response.text}")
         return []
 
-
-def download_image_from_notion(file_url: str) -> Optional[bytes]:
-    """Download image file from Notion URL"""
-    try:
-        # Notion file URLs have expiry, we need to include auth header
-        headers = {'Authorization': f'Bearer {NOTION_TOKEN}'}
-        response = requests.get(file_url, headers=headers, timeout=10)
-        response.raise_for_status()
-        return response.content
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Failed to download image: {e}")
-        return None
-
-
-def extract_image_from_notion_entry(entry: Dict) -> Optional[bytes]:
-    """Extract and download image from Notion entry"""
+def extract_meal_photo_url(entry):
+    """Extract the meal photo URL from Notion entry"""
     try:
         properties = entry.get('properties', {})
-        meal_photo_prop = properties.get('Meal Photo', {})
+        meal_photo = properties.get('Meal Photo', {})
         
-        if meal_photo_prop.get('type') != 'files':
-            return None
-        
-        files = meal_photo_prop.get('files', [])
-        if not files:
-            return None
-        
-        file_obj = files[0]
-        if file_obj.get('type') == 'file':
-            file_url = file_obj.get('file', {}).get('url')
-            if file_url:
-                return download_image_from_notion(file_url)
-    
+        if meal_photo.get('type') == 'files':
+            files = meal_photo.get('files', [])
+            if files and len(files) > 0:
+                file_obj = files[0]
+                if 'file' in file_obj:
+                    return file_obj['file'].get('url')
+                elif 'external' in file_obj:
+                    return file_obj['external'].get('url')
+        return None
     except Exception as e:
-        logger.error(f"Error extracting image: {e}")
-    
-    return None
+        logger.warning(f"Error extracting meal photo: {e}")
+        return None
 
-
-def analyze_food_with_openai(image_data: bytes) -> Optional[Dict[str, Any]]:
-    """
-    Send food image to OpenAI GPT-4 Vision for analysis
-    Returns structured nutrition data
-    """
+def analyze_food_image(image_url):
+    """Send image to OpenAI for analysis"""
     try:
-        # Convert image to base64
-        base64_image = base64.standard_b64encode(image_data).decode('utf-8')
+        logger.info(f"Analyzing food image: {image_url}")
         
-        # Create prompt for food analysis
-        analysis_prompt = f"""You are a professional nutritionist and food analyst. 
-Analyze this food image and provide detailed nutritional insights.
-
-User Profile:
-- Age: {NUTRITION_CONFIG['user_age']} years
-- Location: {NUTRITION_CONFIG['user_location']}
-- Daily KCal Target: {NUTRITION_CONFIG['daily_kcal_target']} KCal
-- Daily Protein Target: {NUTRITION_CONFIG['daily_protein_target']}g
-- Daily Carbs Target: {NUTRITION_CONFIG['daily_carbs_target']}g
-- Daily Fat Target: {NUTRITION_CONFIG['daily_fat_target']}g
-
-Please analyze this meal and return a JSON response with:
-{{
-    "food_name": "Name of the dish (e.g., Chicken Biryani)",
-    "estimated_kcal": <estimated total calories as integer>,
-    "protein_g": <estimated protein in grams>,
-    "carbs_g": <estimated carbohydrates in grams>,
-    "fat_g": <estimated fat in grams>,
-    "food_score": <health score 0-100 where 100 is perfectly healthy>,
-    "ai_insight": "<1-2 sentences about this food's nutritional profile>",
-    "healthy_tips": "<1-2 sentences on how to make this meal healthier>",
-    "food_type": "<category: vegetarian/non-vegetarian/vegan/etc>",
-    "portion_size": "<estimated portion size>"
-}}
-
-Be conservative in calorie estimates. Use Indian food nutrition databases when applicable.
-Return ONLY valid JSON, no markdown or extra text."""
-        
-        response = openai_client.chat.completions.create(
-            model='gpt-4o-mini',
+        message = openai_client.messages.create(
+            model="gpt-4o-mini",
+            max_tokens=500,
             messages=[
                 {
-                    'role': 'user',
-                    'content': [
+                    "role": "user",
+                    "content": [
                         {
-                            'type': 'text',
-                            'text': analysis_prompt
+                            "type": "text",
+                            "text": """Analyze this food image and provide the following in JSON format:
+                            {
+                                "food_name": "name of the food",
+                                "estimated_calories": number,
+                                "protein_g": number,
+                                "carbs_g": number,
+                                "fat_g": number,
+                                "health_score": number between 0-100,
+                                "insight": "one sentence insight about this meal",
+                                "healthy_tips": "one suggestion to make this healthier"
+                            }
+                            
+                            For the health_score, consider:
+                            - Nutritional balance (protein, carbs, healthy fats)
+                            - Calories relative to 2000 KCal daily target (35-year-old male, Mumbai)
+                            - Presence of vegetables, whole grains, lean proteins
+                            - Portion size reasonableness
+                            
+                            Score: 80-100 = Excellent, 60-79 = Good, 40-59 = Fair, 0-39 = Needs Improvement"""
                         },
                         {
-                            'type': 'image_url',
-                            'image_url': {
-                                'url': f'data:image/jpeg;base64,{base64_image}',
-                                'detail': 'high'
+                            "type": "image_url",
+                            "image_url": {
+                                "url": image_url
                             }
                         }
                     ]
                 }
-            ],
-            max_tokens=1000,
-            temperature=0.3
+            ]
         )
         
-        # Parse JSON response
-        response_text = response.choices[0].message.content.strip()
+        # Extract JSON from response
+        response_text = message.content[0].text
+        logger.info(f"OpenAI Response: {response_text}")
         
-        # Try to extract JSON from response (in case it's wrapped in markdown)
-        if '```json' in response_text:
-            response_text = response_text.split('```json')[1].split('```')[0]
-        elif '```' in response_text:
-            response_text = response_text.split('```')[1].split('```')[0]
+        # Try to parse JSON
+        try:
+            analysis = json.loads(response_text)
+        except json.JSONDecodeError:
+            # If response is not pure JSON, extract JSON from text
+            import re
+            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+            if json_match:
+                analysis = json.loads(json_match.group())
+            else:
+                logger.error("Could not extract JSON from OpenAI response")
+                return None
         
-        analysis = json.loads(response_text)
-        logger.info(f"Successfully analyzed food: {analysis.get('food_name')}")
         return analysis
-    
-    except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse OpenAI response as JSON: {e}")
-        return None
     except Exception as e:
-        logger.error(f"Error analyzing food with OpenAI: {e}")
+        logger.error(f"Error analyzing food image: {e}")
         return None
 
-
-def update_notion_entry(entry_id: str, analysis: Dict[str, Any], pdf_file_id: Optional[str] = None):
+def update_notion_entry(entry_id, analysis, pdf_url=None):
     """Update Notion entry with analysis results"""
     try:
         url = f'https://api.notion.com/v1/pages/{entry_id}'
         
-        # Prepare update payload
         payload = {
-            'properties': {
-                'Food Name': {
-                    'title': [
+            "properties": {
+                "KCal Count": {
+                    "number": analysis.get('estimated_calories', 0)
+                },
+                "Protein (g)": {
+                    "number": analysis.get('protein_g', 0)
+                },
+                "Carbs (g)": {
+                    "number": analysis.get('carbs_g', 0)
+                },
+                "Fat (g)": {
+                    "number": analysis.get('fat_g', 0)
+                },
+                "Food Score": {
+                    "number": analysis.get('health_score', 0)
+                },
+                "AI Insight": {
+                    "rich_text": [
                         {
-                            'text': {'content': analysis.get('food_name', 'Unknown')}
+                            "type": "text",
+                            "text": {
+                                "content": analysis.get('insight', '')
+                            }
                         }
                     ]
                 },
-                'AI Analysis Done': {
-                    'checkbox': True
-                },
-                'KCal Count': {
-                    'number': analysis.get('estimated_kcal', 0)
-                },
-                'Protein (g)': {
-                    'number': analysis.get('protein_g', 0)
-                },
-                'Carbs (g)': {
-                    'number': analysis.get('carbs_g', 0)
-                },
-                'Fat (g)': {
-                    'number': analysis.get('fat_g', 0)
-                },
-                'Food Score': {
-                    'number': analysis.get('food_score', 0)
-                },
-                'AI Insight': {
-                    'rich_text': [
+                "Healthy Tips": {
+                    "rich_text": [
                         {
-                            'text': {'content': analysis.get('ai_insight', '')}
+                            "type": "text",
+                            "text": {
+                                "content": analysis.get('healthy_tips', '')
+                            }
                         }
                     ]
                 },
-                'Healthy Tips': {
-                    'rich_text': [
-                        {
-                            'text': {'content': analysis.get('healthy_tips', '')}
-                        }
-                    ]
-                },
-                'Analysis DateTime': {
-                    'date': {
-                        'start': datetime.now().isoformat()
-                    }
+                "AI Analysis Done": {
+                    "checkbox": True
                 }
             }
         }
         
-        response = requests.patch(url, headers=notion_headers, json=payload)
+        # Add PDF report if available
+        if pdf_url:
+            payload["properties"]["PDF Report"] = {
+                "files": [
+                    {
+                        "type": "external",
+                        "name": "Food Analysis Report",
+                        "external": {
+                            "url": pdf_url
+                        }
+                    }
+                ]
+            }
+        
+        response = requests.patch(url, headers=notion_headers, json=payload, timeout=10)
         response.raise_for_status()
-        logger.info(f"Updated Notion entry {entry_id}")
+        logger.info(f"✅ Updated Notion entry: {entry_id}")
         return True
-    
+        
     except requests.exceptions.RequestException as e:
         logger.error(f"Failed to update Notion entry: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            logger.error(f"Response: {e.response.text}")
         return False
-
-
-def upload_pdf_to_notion(entry_id: str, pdf_data: bytes, filename: str) -> bool:
-    """Upload generated PDF to Notion as file attachment"""
-    try:
-        # First, create file in Notion (simplified approach)
-        # In production, you'd need to handle file uploads more carefully
-        # For now, we'll just mark completion and store PDF locally
-        logger.info(f"PDF generated for entry {entry_id}: {filename}")
-        return True
-    
-    except Exception as e:
-        logger.error(f"Error uploading PDF: {e}")
-        return False
-
-
-def process_food_entry(entry: Dict) -> bool:
-    """
-    Complete workflow for single food entry:
-    1. Extract image from Notion
-    2. Analyze with OpenAI
-    3. Generate PDF infographic
-    4. Update Notion with results
-    """
-    try:
-        entry_id = entry.get('id')
-        logger.info(f"Processing entry {entry_id}")
-        
-        # Step 1: Extract image
-        image_data = extract_image_from_notion_entry(entry)
-        if not image_data:
-            logger.warning(f"No image found in entry {entry_id}")
-            return False
-        
-        # Step 2: Analyze with OpenAI
-        analysis = analyze_food_with_openai(image_data)
-        if not analysis:
-            logger.warning(f"Failed to analyze food in entry {entry_id}")
-            return False
-        
-        # Step 3: Generate PDF infographic
-        try:
-            pdf_data = generate_food_infographic(
-                food_image=image_data,
-                analysis=analysis,
-                user_config=NUTRITION_CONFIG
-            )
-        except Exception as e:
-            logger.error(f"Failed to generate PDF: {e}")
-            pdf_data = None
-        
-        # Step 4: Update Notion
-        success = update_notion_entry(entry_id, analysis)
-        
-        if success and pdf_data:
-            # Save PDF locally for GitHub Actions artifact
-            pdf_filename = f"foodinsight_{entry_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-            output_dir = Path('artifacts')
-            output_dir.mkdir(exist_ok=True)
-            
-            with open(output_dir / pdf_filename, 'wb') as f:
-                f.write(pdf_data)
-            
-            logger.info(f"PDF saved: {pdf_filename}")
-            upload_pdf_to_notion(entry_id, pdf_data, pdf_filename)
-        
-        return success
-    
-    except Exception as e:
-        logger.error(f"Error processing entry: {e}")
-        return False
-
 
 def main():
-    """Main execution function"""
     logger.info("Starting FoodInsight AI analysis...")
     
     # Validate environment variables
-    if not all([NOTION_TOKEN, NOTION_DATABASE_ID, OPENAI_API_KEY]):
+    if not NOTION_TOKEN or not NOTION_DATABASE_ID or not OPENAI_API_KEY:
         logger.error("Missing required environment variables")
-        sys.exit(1)
+        return
     
-    # Fetch unprocessed entries
+    # Fetch unanalyzed entries
     entries = get_notion_database_items()
     logger.info(f"Found {len(entries)} unprocessed entries")
     
@@ -378,13 +250,44 @@ def main():
         return
     
     # Process each entry
-    success_count = 0
     for entry in entries:
-        if process_food_entry(entry):
-            success_count += 1
-    
-    logger.info(f"Processing complete: {success_count}/{len(entries)} entries processed successfully")
+        try:
+            entry_id = entry['id']
+            properties = entry['properties']
+            food_name = properties.get('Food Name', {}).get('title', [{}])[0].get('text', {}).get('content', 'Unknown')
+            
+            logger.info(f"Processing: {food_name}")
+            
+            # Extract meal photo URL
+            meal_photo_url = extract_meal_photo_url(entry)
+            if not meal_photo_url:
+                logger.warning(f"No meal photo found for {food_name}")
+                continue
+            
+            # Analyze food image
+            analysis = analyze_food_image(meal_photo_url)
+            if not analysis:
+                logger.error(f"Failed to analyze {food_name}")
+                continue
+            
+            logger.info(f"Analysis results: {analysis}")
+            
+            # Generate PDF infographic
+            try:
+                pdf_path = generate_food_infographic(food_name, analysis, meal_photo_url)
+                logger.info(f"Generated PDF: {pdf_path}")
+            except Exception as e:
+                logger.warning(f"PDF generation failed: {e}")
+                pdf_path = None
+            
+            # Update Notion entry
+            update_notion_entry(entry_id, analysis, pdf_url=pdf_path)
+            
+            logger.info(f"✅ Completed processing: {food_name}")
+            
+        except Exception as e:
+            logger.error(f"Error processing entry: {e}")
+            continue
 
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
