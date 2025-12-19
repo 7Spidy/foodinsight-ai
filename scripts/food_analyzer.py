@@ -60,33 +60,39 @@ def get_notion_database_items() -> list:
     """Fetch all entries from Notion database that haven't been analyzed"""
     url = f'https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query'
     
-    payload = {
-        'filter': {
-            'property': 'AI Analysis Done',
-            'checkbox': {
-                'equals': False
-            }
-        },
-        'page_size': 10
-    }
+    # Simple query without complex filter - just get all entries
+    payload = {}
     
     try:
         response = requests.post(url, headers=notion_headers, json=payload, timeout=10)
         response.raise_for_status()
-        return response.json().get('results', [])
+        results = response.json().get('results', [])
+        logger.info(f"Fetched {len(results)} entries from Notion")
+        
+        # Filter locally for unanalyzed entries
+        unanalyzed = []
+        for entry in results:
+            try:
+                properties = entry.get('properties', {})
+                # Check if 'AI Analysis Done' checkbox exists and is False
+                if 'AI Analysis Done' in properties:
+                    checkbox_value = properties['AI Analysis Done'].get('checkbox', False)
+                    if not checkbox_value:
+                        unanalyzed.append(entry)
+                else:
+                    # If field doesn't exist, include entry (treat as unanalyzed)
+                    unanalyzed.append(entry)
+            except Exception as e:
+                logger.warning(f"Error processing entry: {e}")
+                continue
+        
+        logger.info(f"Found {len(unanalyzed)} unanalyzed entries")
+        return unanalyzed
+        
     except requests.exceptions.RequestException as e:
         logger.error(f"Failed to fetch Notion database: {e}")
-        logger.error(f"Response: {e.response.text if hasattr(e, 'response') else 'N/A'}")
-        return []
-
-
-    
-    try:
-        response = requests.post(url, headers=notion_headers, json=payload)
-        response.raise_for_status()
-        return response.json().get('results', [])
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Failed to fetch Notion database: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            logger.error(f"Response: {e.response.text}")
         return []
 
 
