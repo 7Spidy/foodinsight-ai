@@ -1,12 +1,10 @@
 import os
-import requests
-import json
 import logging
 from datetime import datetime
-from dotenv import load_dotenv
+import requests
 from openai import OpenAI
+from dotenv import load_dotenv
 import httpx
-from pdf_generator import generate_food_infographic
 
 # Load environment variables
 load_dotenv()
@@ -18,48 +16,63 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# API Keys from environment
+# Get environment variables
 NOTION_TOKEN = os.getenv('NOTION_TOKEN')
 NOTION_DATABASE_ID = os.getenv('NOTION_DATABASE_ID')
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 
-# Notion API headers
+# DEBUG: Log secret values (without exposing full secrets)
+logger.info(f"NOTION_TOKEN: {NOTION_TOKEN[:20] if NOTION_TOKEN else 'NOT SET'}...")
+logger.info(f"NOTION_DATABASE_ID: {NOTION_DATABASE_ID} (length: {len(NOTION_DATABASE_ID) if NOTION_DATABASE_ID else 0})")
+logger.info(f"OPENAI_API_KEY: {OPENAI_API_KEY[:20] if OPENAI_API_KEY else 'NOT SET'}...")
+
+# Verify database ID is 32 chars
+if NOTION_DATABASE_ID and len(NOTION_DATABASE_ID) != 32:
+    logger.error(f"❌ DATABASE ID IS WRONG LENGTH: {len(NOTION_DATABASE_ID)} chars (should be 32)")
+    logger.error(f"Database ID: {NOTION_DATABASE_ID}")
+    exit(1)
+
+# Set up headers
 notion_headers = {
     'Authorization': f'Bearer {NOTION_TOKEN}',
     'Notion-Version': '2025-09-03',
     'Content-Type': 'application/json'
 }
 
-# Initialize OpenAI client
+# Initialize OpenAI
 openai_client = OpenAI(
     api_key=OPENAI_API_KEY,
     http_client=httpx.Client()
 )
 
-def get_notion_database_items():
-    """Fetch all entries from Notion database that haven't been analyzed"""
+logger.info("Starting FoodInsight AI analysis...")
+
+def get_notion_database_items() -> list:
+    """Fetch all entries from Notion database"""
     url = f'https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query'
+    
+    logger.info(f"Request URL: {url}")
+    logger.info(f"Headers: Authorization=*****, Notion-Version=2025-09-03, Content-Type=application/json")
     
     payload = {}
     
     try:
         response = requests.post(url, headers=notion_headers, json=payload, timeout=10)
+        logger.info(f"Response Status: {response.status_code}")
         response.raise_for_status()
         results = response.json().get('results', [])
-        logger.info(f"Fetched {len(results)} entries from Notion")
+        logger.info(f"✅ Fetched {len(results)} entries from Notion")
         
         # Filter locally for unanalyzed entries
         unanalyzed = []
         for entry in results:
             try:
                 properties = entry.get('properties', {})
-                # Check if 'AI Analysis Done' checkbox exists and is False
                 if 'AI Analysis Done' in properties:
                     checkbox_value = properties['AI Analysis Done'].get('checkbox', False)
                     if not checkbox_value:
                         unanalyzed.append(entry)
                 else:
-                    # If field doesn't exist, include entry (treat as unanalyzed)
                     unanalyzed.append(entry)
             except Exception as e:
                 logger.warning(f"Error processing entry: {e}")
@@ -71,8 +84,13 @@ def get_notion_database_items():
     except requests.exceptions.RequestException as e:
         logger.error(f"Failed to fetch Notion database: {e}")
         if hasattr(e, 'response') and e.response is not None:
+            logger.error(f"Response Status: {e.response.status_code}")
             logger.error(f"Response: {e.response.text}")
         return []
+
+# Run the function
+get_notion_database_items()
+logger.info("Completed!")
 
 def extract_meal_photo_url(entry):
     """Extract the meal photo URL from Notion entry"""
