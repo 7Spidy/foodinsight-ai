@@ -60,14 +60,31 @@ def get_notion_database_items() -> list:
     """Fetch all entries from Notion database that haven't been analyzed"""
     url = f'https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query'
     
-    # Filter for entries where 'AI Analysis Done' is false
-    payload = {
-        'filter': {
-            'property': 'AI Analysis Done',
-            'checkbox': {'equals': False}
-        },
-        'page_size': 10
-    }
+    # Get all entries, filter locally
+    payload = {'page_size': 10}
+    
+    try:
+        response = requests.post(url, headers=notion_headers, json=payload)
+        response.raise_for_status()
+        results = response.json().get('results', [])
+        
+        # Filter locally for unanalyzed entries
+        unanalyzed = []
+        for entry in results:
+            properties = entry.get('properties', {})
+            analysis_done = properties.get('AI Analysis Done', {})
+            
+            if analysis_done.get('type') == 'checkbox':
+                if not analysis_done.get('checkbox', False):
+                    unanalyzed.append(entry)
+            else:
+                unanalyzed.append(entry)
+        
+        return unanalyzed
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Failed to fetch Notion database: {e}")
+        return []
+
     
     try:
         response = requests.post(url, headers=notion_headers, json=payload)
