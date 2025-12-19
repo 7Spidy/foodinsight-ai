@@ -37,7 +37,12 @@ notion_headers = {
     'Content-Type': 'application/json'
 }
 
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
+openai_client = OpenAI(
+    api_key=OPENAI_API_KEY,
+    timeout=30.0,
+    max_retries=2
+)
+
 
 # Configuration for India-specific nutrition
 NUTRITION_CONFIG = {
