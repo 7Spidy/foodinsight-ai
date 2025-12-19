@@ -33,7 +33,7 @@ OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 # Initialize clients
 notion_headers = {
     'Authorization': f'Bearer {NOTION_TOKEN}',
-    'Notion-Version': '2024-04-04',
+    'Notion-Version': '2025-09-03',
     'Content-Type': 'application/json'
 }
 
