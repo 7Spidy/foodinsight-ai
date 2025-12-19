@@ -58,7 +58,14 @@ NUTRITION_CONFIG = {
 
 def get_notion_database_items() -> list:
     """Fetch all entries from Notion database that haven't been analyzed"""
-    url = f'https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query'
+# Debug: Print what we're actually sending
+logger.info(f"Database ID: {NOTION_DATABASE_ID}")
+logger.info(f"Database ID type: {type(NOTION_DATABASE_ID)}")
+logger.info(f"Database ID length: {len(NOTION_DATABASE_ID)}")
+
+url = f'https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query'
+logger.info(f"Full URL: {url}")
+
     
     # Simple query without complex filter - just get all entries
     payload = {}
